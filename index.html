@@ -44,7 +44,7 @@
         </div>
     </div>
 
-    <script>
+<script>
         let peer, localStream;
         const video = document.getElementById('v');
         const chat = document.getElementById('chatFrame');
@@ -53,10 +53,11 @@
             document.getElementById('setup').style.display = 'none';
             document.getElementById('interface').style.display = 'block';
 
+            // Cria o Peer corretamente para ambos os modos
             peer = new Peer(mode === 'camera' ? Math.floor(10000000 + Math.random() * 90000000).toString() : null);
 
             peer.on('open', id => {
-                document.getElementById('status').innerText = mode === 'camera' ? 'Seu ID: ' + id : 'Pronto para conectar';
+                document.getElementById('status').innerText = mode === 'camera' ? 'Seu ID: ' + id : 'Pronto. Cole o ID do celular:';
                 if(mode === 'pc') document.getElementById('pc-controls').style.display = 'block';
             });
 
@@ -65,7 +66,9 @@
                     .then(stream => {
                         localStream = stream;
                         video.srcObject = stream;
-                        peer.on('call', call => call.answer(stream));
+                        peer.on('call', call => {
+                            call.answer(stream);
+                        });
                     });
             } else {
                 peer.on('call', call => {
@@ -77,8 +80,16 @@
 
         function connectToPeer() {
             const id = document.getElementById('targetId').value;
-            const call = peer.call(id, localStream);
-            call.on('stream', remoteStream => video.srcObject = remoteStream);
+            if (!peer) {
+                alert("Erro: O sistema não inicializou. Recarregue a página.");
+                return;
+            }
+            
+            // Aqui garantimos que o peer existe antes de chamar .call
+            const call = peer.call(id, new MediaStream());
+            call.on('stream', remoteStream => {
+                video.srcObject = remoteStream;
+            });
         }
 
         function loadChat() {
