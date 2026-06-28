@@ -5,7 +5,7 @@
     <title>Stream Controller Pro</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
-        body { margin: 0; background: #121212; color: white; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; }
+        body { margin: 0; background: #121212; color: white; font-family: sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
         #setup, #interface { padding: 20px; text-align: center; }
         #main-container { display: flex; flex: 1; overflow: hidden; padding: 10px; gap: 10px; }
         #video-container { flex: 2; background: #000; display: flex; align-items: center; justify-content: center; border-radius: 8px; }
@@ -44,7 +44,7 @@
         </div>
     </div>
 
-<script>
+    <script>
         let peer, localStream;
         const video = document.getElementById('v');
         const chat = document.getElementById('chatFrame');
@@ -53,7 +53,7 @@
             document.getElementById('setup').style.display = 'none';
             document.getElementById('interface').style.display = 'block';
 
-            // Cria o Peer corretamente para ambos os modos
+            // Inicializa o Peer
             peer = new Peer(mode === 'camera' ? Math.floor(10000000 + Math.random() * 90000000).toString() : null);
 
             peer.on('open', id => {
@@ -66,30 +66,31 @@
                     .then(stream => {
                         localStream = stream;
                         video.srcObject = stream;
+                        
                         peer.on('call', call => {
-                            call.answer(stream);
+                            call.answer(stream); // Responde a chamada com a câmera
                         });
-                    });
+                    })
+                    .catch(err => alert("Erro ao acessar câmera: " + err));
             } else {
                 peer.on('call', call => {
-                    call.answer();
-                    call.on('stream', remoteStream => video.srcObject = remoteStream);
+                    call.answer(); // Responde para aceitar o stream
+                    call.on('stream', remoteStream => {
+                        video.srcObject = remoteStream;
+                    });
                 });
             }
         }
 
         function connectToPeer() {
-            const id = document.getElementById('targetId').value;
-            if (!peer) {
-                alert("Erro: O sistema não inicializou. Recarregue a página.");
-                return;
-            }
+            const id = document.getElementById('targetId').value.trim();
+            if (!peer) return alert("Sistema não inicializado.");
             
-            // Aqui garantimos que o peer existe antes de chamar .call
             const call = peer.call(id, new MediaStream());
             call.on('stream', remoteStream => {
                 video.srcObject = remoteStream;
             });
+            call.on('error', err => alert("Erro de conexão: " + err));
         }
 
         function loadChat() {
