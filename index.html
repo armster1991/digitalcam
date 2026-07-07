@@ -2,7 +2,7 @@
 <html lang="pt-br">
 <head>
     <meta charset="UTF-8">
-    <title>Armster91 - Digital Cam</title>
+    <title>Armster91 Digital Cam</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         body { margin: 0; background: #121212; color: white; font-family: sans-serif; height: 100vh; overflow: hidden; }
@@ -45,11 +45,10 @@
     </div>
 
     <script>
-        // ID fixo do celular (câmera). Como está numa rede local com uma câmera só,
-        // não precisamos mais digitar/copiar nenhum PIN — o PC já sabe pra quem ligar.
-        // Se algum dia você usar mais de uma câmera, é só duplicar esse arquivo e
-        // trocar esse ID em cada uma.
+        // IDs fixos dos dois papéis. Como cada um tem um ID conhecido, ninguém
+        // precisa digitar/copiar nada — eles se acham sozinhos no servidor de sinalização.
         const CAMERA_ID = 'armster91-obs-cam';
+        const PC_ID = 'armster91-obs-pc';
 
         const statusEl = document.getElementById('status');
         const video = document.getElementById('v');
@@ -85,15 +84,16 @@
 
             setStatus('warn', 'Conectando ao servidor de sinalização...');
 
-            const peerId = mode === 'camera' ? CAMERA_ID : undefined;
+            const peerId = mode === 'camera' ? CAMERA_ID : PC_ID;
             peer = new Peer(peerId, { config: rtcConfig, debug: 2 });
 
             peer.on('error', err => {
                 console.error('Peer error:', err);
                 if (err.type === 'unavailable-id') {
-                    setStatus('err', 'Já existe uma câmera conectada com esse ID (provavelmente uma aba antiga ainda aberta). Feche as outras abas/telas e recarregue esta página.');
+                    setStatus('err', 'Já existe uma sessão desse papel conectada (provavelmente uma aba antiga ainda aberta). Feche as outras abas/telas e recarregue esta página.');
                 } else if (err.type === 'peer-unavailable') {
-                    setStatus('warn', 'Celular ainda não está online. Tentando de novo...');
+                    setStatus('warn', 'Outro dispositivo ainda não está online. Tentando de novo...');
+                    if (mode === 'camera') retryTimer = setTimeout(tryCallPC, 3000);
                 } else if (err.type === 'network' || err.type === 'server-error') {
                     setStatus('err', 'Sem conexão com o servidor de sinalização (precisa de internet, mesmo sendo local). Verifique a rede e recarregue.');
                 } else {
@@ -113,61 +113,73 @@
                         localStream = stream;
                         video.srcObject = stream;
                         video.classList.add('mirror'); // espelha só o preview local do celular
-                        setStatus('warn', 'Câmera pronta. Aguardando o PC conectar...');
+                        setStatus('warn', 'Câmera pronta. Conectando ao PC...');
 
-                        peer.on('call', call => {
-                            currentCall = call;
-                            call.answer(stream);
-                            setStatus('ok', 'PC conectado!');
-                            monitorCall(call);
-                        });
+                        if (peer.open) {
+                            tryCallPC();
+                        } else {
+                            peer.on('open', tryCallPC);
+                        }
                     })
                     .catch(err => {
                         setStatus('err', 'Não consegui acessar a câmera: ' + err.message);
                     });
 
+            } else {
+                // PC: fica esperando o celular ligar. Não precisa de câmera própria nem
+                // de digitar ID nenhum — só responde em modo "somente recepção".
                 peer.on('open', () => {
-                    setStatus('warn', 'Câmera pronta. Aguardando o PC conectar...');
+                    setStatus('warn', 'Aguardando o celular conectar...');
                 });
 
-            } else {
-                // PC: tenta ligar sozinho pro ID fixo da câmera, sem precisar digitar nada.
-                peer.on('open', () => {
-                    setStatus('warn', 'Procurando câmera na rede...');
-                    tryConnect();
+                peer.on('call', call => {
+                    currentCall = call;
+                    call.answer(); // sem stream = recebe só, não envia nada de volta
+                    setStatus('warn', 'Recebendo chamada, aguardando vídeo...');
+
+                    call.on('stream', remoteStream => {
+                        video.srcObject = remoteStream;
+                        video.classList.remove('mirror');
+                        video.play();
+                        setStatus('ok', 'Conectado à câmera!');
+                    });
+
+                    call.on('close', () => {
+                        setStatus('warn', 'Celular desconectou. Aguardando reconexão...');
+                        video.srcObject = null;
+                    });
+
+                    monitorCall(call);
                 });
             }
         }
 
-        function tryConnect() {
+        function tryCallPC() {
             clearTimeout(retryTimer);
-            const call = peer.call(CAMERA_ID, new MediaStream());
+            setStatus('warn', 'Conectando ao PC...');
+
+            const call = peer.call(PC_ID, localStream);
             currentCall = call;
 
-            call.on('stream', remoteStream => {
-                video.srcObject = remoteStream;
-                video.classList.remove('mirror');
-                video.play();
-                setStatus('ok', 'Conectado à câmera!');
-                monitorCall(call);
+            call.on('error', () => {
+                retryTimer = setTimeout(tryCallPC, 3000);
             });
 
             call.on('close', () => {
-                setStatus('warn', 'Câmera desconectou. Tentando reconectar...');
-                retryTimer = setTimeout(tryConnect, 3000);
+                setStatus('warn', 'PC desconectou. Tentando reconectar...');
+                retryTimer = setTimeout(tryCallPC, 3000);
             });
 
-            call.on('error', () => {
-                setStatus('err', 'Erro na ligação. Tentando de novo...');
-                retryTimer = setTimeout(tryConnect, 3000);
-            });
+            monitorCall(call);
 
-            // Se em alguns segundos não chegou stream nenhum, tenta de novo
-            // (cobre o caso do celular ainda não estar pronto)
+            // Se em alguns segundos a conexão não completar, tenta de novo
+            // (cobre o caso do PC ainda não estar pronto ou ICE ter travado)
             retryTimer = setTimeout(() => {
-                if (!video.srcObject) {
-                    setStatus('warn', 'Câmera não respondeu ainda. Tentando de novo...');
-                    tryConnect();
+                const pc = call.peerConnection;
+                const state = pc && pc.iceConnectionState;
+                if (state !== 'connected' && state !== 'completed') {
+                    setStatus('warn', 'PC não respondeu ainda. Tentando de novo...');
+                    tryCallPC();
                 }
             }, 6000);
         }
@@ -180,8 +192,8 @@
                 console.log('ICE state:', state);
                 if (state === 'disconnected' || state === 'failed') {
                     setStatus(state === 'failed' ? 'err' : 'warn', 'Conexão caiu (' + state + '). Tentando reconectar...');
-                    if (role === 'pc') {
-                        retryTimer = setTimeout(tryConnect, 2000);
+                    if (role === 'camera') {
+                        retryTimer = setTimeout(tryCallPC, 2000);
                     }
                 } else if (state === 'connected' || state === 'completed') {
                     setStatus('ok', role === 'camera' ? 'PC conectado!' : 'Conectado à câmera!');
