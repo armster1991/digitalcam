@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <title>Stream Controller Pro</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body { margin: 0; background: #121212; color: white; font-family: sans-serif; height: 100vh; overflow: hidden; }
+        #setup {
+            height: 100vh; display: flex; flex-direction: column;
+            align-items: center; justify-content: center; text-align: center; gap: 12px;
+        }
+        #interface { display: none; height: 100vh; position: relative; }
+        #video-container { width: 100%; height: 100%; background: #000; display: flex; align-items: center; justify-content: center; }
+        video { width: 100%; height: 100%; object-fit: contain; }
+        video.mirror { transform: scaleX(-1); }
+        .btn {
+            padding: 15px 25px; font-size: 16px; cursor: pointer;
+            background: #9146FF; color: white; border: none; border-radius: 5px;
+        }
+        .btn:hover { background: #7c2eff; }
+        #status {
+            position: absolute; top: 12px; left: 12px; right: 12px;
+            padding: 8px 14px; background: rgba(0,0,0,0.6); border-radius: 6px;
+            font-size: 14px; z-index: 10; pointer-events: none;
+        }
+        #status.ok { color: #4ade80; }
+        #status.warn { color: #facc15; }
+        #status.err { color: #f87171; }
+    </style>
+</head>
+<body>
+
+    <div id="setup">
+        <h1>Escolha seu papel</h1>
+        <button class="btn" onclick="init('camera')">📱 Sou o Celular (Transmissor)</button>
+        <button class="btn" onclick="init('pc')">🖥️ Sou o PC (Receptor)</button>
+    </div>
+
+    <div id="interface">
+        <div id="status">Iniciando...</div>
+        <div id="video-container">
+            <video id="v" autoplay playsinline muted></video>
+        </div>
+    </div>
+
+    <script>
+        // ID fixo do celular (câmera). Como está numa rede local com uma câmera só,
+        // não precisamos mais digitar/copiar nenhum PIN — o PC já sabe pra quem ligar.
+        // Se algum dia você usar mais de uma câmera, é só duplicar esse arquivo e
+        // trocar esse ID em cada uma.
+        const CAMERA_ID = 'armster91-obs-cam';
+
+        const statusEl = document.getElementById('status');
+        const video = document.getElementById('v');
+        let peer, localStream, currentCall, role, retryTimer;
+
+        const STATUS_LABELS = {
+            ok:   'Conectado',
+            warn: 'Aguardando Sinal',
+            err:  'Falha de Conexão'
+        };
+
+        // kind: 'ok' | 'warn' | 'err'. detail: mensagem completa, só pro console (debug).
+        function setStatus(kind, detail) {
+            statusEl.textContent = STATUS_LABELS[kind] || kind;
+            statusEl.className = kind || '';
+            console.log('[status]', kind, '-', detail || '');
+        }
+
+        // STUN público — usado só pra ajudar a achar o melhor caminho de rede.
+        // Em rede local isso normalmente nem é necessário, o navegador já acha
+        // o caminho direto sozinho.
+        const rtcConfig = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        function init(mode) {
+            role = mode;
+            document.getElementById('setup').style.display = 'none';
+            document.getElementById('interface').style.display = 'block';
+
+            setStatus('warn', 'Conectando ao servidor de sinalização...');
+
+            const peerId = mode === 'camera' ? CAMERA_ID : undefined;
+            peer = new Peer(peerId, { config: rtcConfig, debug: 2 });
+
+            peer.on('error', err => {
+                console.error('Peer error:', err);
+                if (err.type === 'unavailable-id') {
+                    setStatus('err', 'Já existe uma câmera conectada com esse ID (provavelmente uma aba antiga ainda aberta). Feche as outras abas/telas e recarregue esta página.');
+                } else if (err.type === 'peer-unavailable') {
+                    setStatus('warn', 'Celular ainda não está online. Tentando de novo...');
+                } else if (err.type === 'network' || err.type === 'server-error') {
+                    setStatus('err', 'Sem conexão com o servidor de sinalização (precisa de internet, mesmo sendo local). Verifique a rede e recarregue.');
+                } else {
+                    setStatus('err', 'Erro: ' + err.type);
+                }
+            });
+
+            peer.on('disconnected', () => {
+                setStatus('warn', 'Desconectado do servidor de sinalização. Tentando reconectar...');
+                peer.reconnect();
+            });
+
+            if (mode === 'camera') {
+                setStatus('warn', 'Ligando câmera...');
+                navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false })
+                    .then(stream => {
+                        localStream = stream;
+                        video.srcObject = stream;
+                        video.classList.add('mirror'); // espelha só o preview local do celular
+                        setStatus('warn', 'Câmera pronta. Aguardando o PC conectar...');
+
+                        peer.on('call', call => {
+                            currentCall = call;
+                            call.answer(stream);
+                            setStatus('ok', 'PC conectado!');
+                            monitorCall(call);
+                        });
+                    })
+                    .catch(err => {
+                        setStatus('err', 'Não consegui acessar a câmera: ' + err.message);
+                    });
+
+                peer.on('open', () => {
+                    setStatus('warn', 'Câmera pronta. Aguardando o PC conectar...');
+                });
+
+            } else {
+                // PC: tenta ligar sozinho pro ID fixo da câmera, sem precisar digitar nada.
+                peer.on('open', () => {
+                    setStatus('warn', 'Procurando câmera na rede...');
+                    tryConnect();
+                });
+            }
+        }
+
+        function tryConnect() {
+            clearTimeout(retryTimer);
+            const call = peer.call(CAMERA_ID, new MediaStream());
+            currentCall = call;
+
+            call.on('stream', remoteStream => {
+                video.srcObject = remoteStream;
+                video.classList.remove('mirror');
+                video.play();
+                setStatus('ok', 'Conectado à câmera!');
+                monitorCall(call);
+            });
+
+            call.on('close', () => {
+                setStatus('warn', 'Câmera desconectou. Tentando reconectar...');
+                retryTimer = setTimeout(tryConnect, 3000);
+            });
+
+            call.on('error', () => {
+                setStatus('err', 'Erro na ligação. Tentando de novo...');
+                retryTimer = setTimeout(tryConnect, 3000);
+            });
+
+            // Se em alguns segundos não chegou stream nenhum, tenta de novo
+            // (cobre o caso do celular ainda não estar pronto)
+            retryTimer = setTimeout(() => {
+                if (!video.srcObject) {
+                    setStatus('warn', 'Câmera não respondeu ainda. Tentando de novo...');
+                    tryConnect();
+                }
+            }, 6000);
+        }
+
+        function monitorCall(call) {
+            const pc = call.peerConnection;
+            if (!pc) return;
+            pc.oniceconnectionstatechange = () => {
+                const state = pc.iceConnectionState;
+                console.log('ICE state:', state);
+                if (state === 'disconnected' || state === 'failed') {
+                    setStatus(state === 'failed' ? 'err' : 'warn', 'Conexão caiu (' + state + '). Tentando reconectar...');
+                    if (role === 'pc') {
+                        retryTimer = setTimeout(tryConnect, 2000);
+                    }
+                } else if (state === 'connected' || state === 'completed') {
+                    setStatus('ok', role === 'camera' ? 'PC conectado!' : 'Conectado à câmera!');
+                }
+            };
+        }
+    </script>
+</body>
+</html>
